@@ -54,8 +54,8 @@
 /*
 ** 'lalpha' (Lua alphabetic) and 'lalnum' (Lua alphanumeric) both include '_'
 */
-#define lislalpha(c)	testprop(c, MASK(ALPHABIT))
-#define lislalnum(c)	testprop(c, (MASK(ALPHABIT) | MASK(DIGITBIT)))
+#define lislalpha(c)	(testprop(c, MASK(ALPHABIT)) || (c) >= 0x80)
+#define lislalnum(c)	(testprop(c, (MASK(ALPHABIT) | MASK(DIGITBIT))) || (c) >= 0x80)
 #define lisdigit(c)	testprop(c, MASK(DIGITBIT))
 #define lisspace(c)	testprop(c, MASK(SPACEBIT))
 #define lisprint(c)	testprop(c, MASK(PRINTBIT))
@@ -80,8 +80,8 @@ LUAI_DDEC const lu_byte luai_ctype_[UCHAR_MAX + 2];
 #include <ctype.h>
 
 
-#define lislalpha(c)	(isalpha(c) || (c) == '_')
-#define lislalnum(c)	(isalnum(c) || (c) == '_')
+#define lislalpha(c)	(isalpha(c) || (c) == '_' || (c) >= 0x80)
+#define lislalnum(c)	(isalnum(c) || (c) == '_' || (c) >= 0x80)
 #define lisdigit(c)	(isdigit(c))
 #define lisspace(c)	(isspace(c))
 #define lisprint(c)	(isprint(c))
