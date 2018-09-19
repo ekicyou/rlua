@@ -5,7 +5,7 @@ use std::iter::FromIterator;
 
 use rlua::{Function, Lua, MetaMethod, Result, UserData, UserDataMethods, Variadic};
 
-fn guided_tour() -> Result<()> {
+fn main() -> Result<()> {
     // Create a Lua context with `Lua::new()`.  Eventually, this will allow further control on the
     // lua std library, and will specifically allow limiting Lua to a subset of "safe"
     // functionality.
@@ -127,7 +127,7 @@ fn guided_tour() -> Result<()> {
     struct Vec2(f32, f32);
 
     impl UserData for Vec2 {
-        fn add_methods(methods: &mut UserDataMethods<Self>) {
+        fn add_methods<'lua, M: UserDataMethods<'lua, Self>>(methods: &mut M) {
             methods.add_method("magnitude", |_, vec, ()| {
                 let mag_squared = vec.0 * vec.0 + vec.1 * vec.1;
                 Ok(mag_squared.sqrt())
@@ -178,8 +178,4 @@ fn guided_tour() -> Result<()> {
     assert!(lua.eval::<()>("sketchy()", None).is_err());
 
     Ok(())
-}
-
-fn main() {
-    guided_tour().unwrap();
 }
