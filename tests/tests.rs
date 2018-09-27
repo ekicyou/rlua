@@ -4,7 +4,7 @@ extern crate rlua;
 use std::iter::FromIterator;
 use std::panic::catch_unwind;
 use std::sync::Arc;
-use std::{error, fmt};
+use std::{error, f32, f64, fmt};
 
 use failure::err_msg;
 use rlua::{
@@ -47,8 +47,8 @@ fn test_exec() {
     ).unwrap();
     assert_eq!(globals.get::<_, String>("res").unwrap(), "foobar");
 
-    let module: Table =
-        lua.exec(
+    let module: Table = lua
+        .exec(
             r#"
             local module = {}
 
@@ -324,8 +324,8 @@ fn test_result_conversions() {
     let lua = Lua::new();
     let globals = lua.globals();
 
-    let err =
-        lua.create_function(|_, ()| {
+    let err = lua
+        .create_function(|_, ()| {
             Ok(Err::<String, _>(
                 err_msg("only through failure can we succeed").to_lua_err(),
             ))
@@ -354,25 +354,57 @@ fn test_result_conversions() {
 #[test]
 fn test_num_conversion() {
     let lua = Lua::new();
-    let globals = lua.globals();
 
-    globals.set("n", "1.0").unwrap();
-    assert_eq!(globals.get::<_, i64>("n").unwrap(), 1);
-    assert_eq!(globals.get::<_, f64>("n").unwrap(), 1.0);
-    assert_eq!(globals.get::<_, String>("n").unwrap(), "1.0");
+    assert_eq!(
+        lua.coerce_integer(Value::String(lua.create_string("1").unwrap())),
+        Some(1)
+    );
+    assert_eq!(
+        lua.coerce_integer(Value::String(lua.create_string("1.0").unwrap())),
+        Some(1)
+    );
+    assert_eq!(
+        lua.coerce_integer(Value::String(lua.create_string("1.5").unwrap())),
+        None
+    );
 
-    globals.set("n", "1.5").unwrap();
-    assert!(globals.get::<_, i64>("n").is_err());
-    assert_eq!(globals.get::<_, f64>("n").unwrap(), 1.5);
-    assert_eq!(globals.get::<_, String>("n").unwrap(), "1.5");
+    assert_eq!(
+        lua.coerce_number(Value::String(lua.create_string("1").unwrap())),
+        Some(1.0)
+    );
+    assert_eq!(
+        lua.coerce_number(Value::String(lua.create_string("1.0").unwrap())),
+        Some(1.0)
+    );
+    assert_eq!(
+        lua.coerce_number(Value::String(lua.create_string("1.5").unwrap())),
+        Some(1.5)
+    );
 
-    globals.set("n", 1.5).unwrap();
-    assert!(globals.get::<_, i64>("n").is_err());
-    assert_eq!(globals.get::<_, f64>("n").unwrap(), 1.5);
-    assert_eq!(globals.get::<_, String>("n").unwrap(), "1.5");
+    assert_eq!(lua.eval::<i64>("1.0", None).unwrap(), 1);
+    assert_eq!(lua.eval::<f64>("1.0", None).unwrap(), 1.0);
+    assert_eq!(lua.eval::<String>("1.0", None).unwrap(), "1.0");
 
-    lua.exec::<()>("a = math.huge", None).unwrap();
-    assert!(globals.get::<_, i64>("n").is_err());
+    assert_eq!(lua.eval::<i64>("1.5", None).unwrap(), 1);
+    assert_eq!(lua.eval::<f64>("1.5", None).unwrap(), 1.5);
+    assert_eq!(lua.eval::<String>("1.5", None).unwrap(), "1.5");
+
+    assert!(lua.eval::<u64>("-1", None).is_err());
+    assert_eq!(lua.eval::<i64>("-1", None).unwrap(), -1);
+
+    assert!(lua.unpack::<u64>(lua.pack(1u128 << 64).unwrap()).is_err());
+    assert!(lua.eval::<i64>("math.huge", None).is_err());
+
+    assert_eq!(
+        lua.unpack::<f64>(lua.pack(f32::MAX).unwrap()).unwrap(),
+        f32::MAX as f64
+    );
+    assert!(lua.unpack::<f32>(lua.pack(f64::MAX).unwrap()).is_err());
+
+    assert_eq!(
+        lua.unpack::<i128>(lua.pack(1i128 << 64).unwrap()).unwrap(),
+        1i128 << 64
+    );
 }
 
 #[test]
@@ -520,8 +552,8 @@ fn test_named_registry_value() {
     let lua = Lua::new();
 
     lua.set_named_registry_value::<i32>("test", 42).unwrap();
-    let f =
-        lua.create_function(move |lua, ()| {
+    let f = lua
+        .create_function(move |lua, ()| {
             assert_eq!(lua.named_registry_value::<i32>("test")?, 42);
             Ok(())
         }).unwrap();
@@ -540,8 +572,8 @@ fn test_registry_value() {
     let lua = Lua::new();
 
     let mut r = Some(lua.create_registry_value::<i32>(42).unwrap());
-    let f =
-        lua.create_function_mut(move |lua, ()| {
+    let f = lua
+        .create_function_mut(move |lua, ()| {
             if let Some(r) = r.take() {
                 assert_eq!(lua.registry_value::<i32>(&r)?, 42);
                 lua.remove_registry_value(r).unwrap();
@@ -692,11 +724,10 @@ fn large_args() {
                 }
                 Ok(s)
             }).unwrap(),
-        )
-        .unwrap();
+        ).unwrap();
 
-    let f: Function =
-        lua.eval(
+    let f: Function = lua
+        .eval(
             r#"
             return function(...)
                 return c(...)
@@ -716,8 +747,8 @@ fn large_args() {
 fn large_args_ref() {
     let lua = Lua::new();
 
-    let f =
-        lua.create_function(|_, args: Variadic<String>| {
+    let f = lua
+        .create_function(|_, args: Variadic<String>| {
             for i in 0..args.len() {
                 assert_eq!(args[i], i.to_string());
             }
