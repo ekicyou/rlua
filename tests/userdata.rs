@@ -1,6 +1,10 @@
+extern crate failure;
+extern crate rlua;
+
 use std::sync::Arc;
 
-use {ExternalError, Function, Lua, MetaMethod, String, UserData, UserDataMethods};
+use failure::err_msg;
+use rlua::{ExternalError, Function, Lua, MetaMethod, String, UserData, UserDataMethods};
 
 #[test]
 fn test_user_data() {
@@ -15,10 +19,10 @@ fn test_user_data() {
     let userdata1 = lua.create_userdata(UserData1(1)).unwrap();
     let userdata2 = lua.create_userdata(UserData2(Box::new(2))).unwrap();
 
-    assert!(userdata1.is::<UserData1>().unwrap());
-    assert!(!userdata1.is::<UserData2>().unwrap());
-    assert!(userdata2.is::<UserData2>().unwrap());
-    assert!(!userdata2.is::<UserData1>().unwrap());
+    assert!(userdata1.is::<UserData1>());
+    assert!(!userdata1.is::<UserData2>());
+    assert!(userdata2.is::<UserData2>());
+    assert!(!userdata2.is::<UserData1>());
 
     assert_eq!(userdata1.borrow::<UserData1>().unwrap().0, 1);
     assert_eq!(*userdata2.borrow::<UserData2>().unwrap().0, 2);
@@ -29,7 +33,7 @@ fn test_methods() {
     struct MyUserData(i64);
 
     impl UserData for MyUserData {
-        fn add_methods(methods: &mut UserDataMethods<Self>) {
+        fn add_methods<'lua, M: UserDataMethods<'lua, Self>>(methods: &mut M) {
             methods.add_method("get_value", |_, data, ()| Ok(data.0));
             methods.add_method_mut("set_value", |_, data, args| {
                 data.0 = args;
@@ -42,7 +46,7 @@ fn test_methods() {
     let globals = lua.globals();
     let userdata = lua.create_userdata(MyUserData(42)).unwrap();
     globals.set("userdata", userdata.clone()).unwrap();
-    lua.exec::<()>(
+    lua.exec::<_, ()>(
         r#"
             function get_it()
                 return userdata:get_value()
@@ -69,7 +73,7 @@ fn test_metamethods() {
     struct MyUserData(i64);
 
     impl UserData for MyUserData {
-        fn add_methods(methods: &mut UserDataMethods<Self>) {
+        fn add_methods<'lua, M: UserDataMethods<'lua, Self>>(methods: &mut M) {
             methods.add_method("get", |_, data, ()| Ok(data.0));
             methods.add_meta_function(
                 MetaMethod::Add,
@@ -83,7 +87,7 @@ fn test_metamethods() {
                 if index.to_str()? == "inner" {
                     Ok(data.0)
                 } else {
-                    Err(format_err!("no such custom index").to_lua_err())
+                    Err(err_msg("no such custom index").to_lua_err())
                 }
             });
         }
@@ -94,20 +98,20 @@ fn test_metamethods() {
     globals.set("userdata1", MyUserData(7)).unwrap();
     globals.set("userdata2", MyUserData(3)).unwrap();
     assert_eq!(
-        lua.eval::<MyUserData>("userdata1 + userdata2", None)
+        lua.eval::<_, MyUserData>("userdata1 + userdata2", None)
             .unwrap()
             .0,
         10
     );
     assert_eq!(
-        lua.eval::<MyUserData>("userdata1 - userdata2", None)
+        lua.eval::<_, MyUserData>("userdata1 - userdata2", None)
             .unwrap()
             .0,
         4
     );
-    assert_eq!(lua.eval::<i64>("userdata1:get()", None).unwrap(), 7);
-    assert_eq!(lua.eval::<i64>("userdata2.inner", None).unwrap(), 3);
-    assert!(lua.eval::<()>("userdata2.nonexist_field", None).is_err());
+    assert_eq!(lua.eval::<_, i64>("userdata1:get()", None).unwrap(), 7);
+    assert_eq!(lua.eval::<_, i64>("userdata2.inner", None).unwrap(), 3);
+    assert!(lua.eval::<_, ()>("userdata2.nonexist_field", None).is_err());
 }
 
 #[test]
@@ -117,7 +121,7 @@ fn test_gc_userdata() {
     }
 
     impl UserData for MyUserdata {
-        fn add_methods(methods: &mut UserDataMethods<Self>) {
+        fn add_methods<'lua, M: UserDataMethods<'lua, Self>>(methods: &mut M) {
             methods.add_method("access", |_, this, ()| {
                 assert!(this.id == 123);
                 Ok(())
@@ -132,7 +136,7 @@ fn test_gc_userdata() {
     }
 
     assert!(
-        lua.eval::<()>(
+        lua.eval::<_, ()>(
             r#"
                 local tbl = setmetatable({
                     userdata = userdata

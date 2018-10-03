@@ -5,7 +5,7 @@ use std::iter::FromIterator;
 
 use rlua::{Function, Lua, MetaMethod, Result, UserData, UserDataMethods, Variadic};
 
-fn guided_tour() -> Result<()> {
+fn main() -> Result<()> {
     // Create a Lua context with `Lua::new()`.  Eventually, this will allow further control on the
     // lua std library, and will specifically allow limiting Lua to a subset of "safe"
     // functionality.
@@ -27,7 +27,7 @@ fn guided_tour() -> Result<()> {
     // You can load and evaluate lua code.  The second parameter here gives the chunk a better name
     // when lua error messages are printed.
 
-    lua.exec::<()>(
+    lua.exec::<_, ()>(
         r#"
             global = 'foo'..'bar'
         "#,
@@ -35,9 +35,9 @@ fn guided_tour() -> Result<()> {
     )?;
     assert_eq!(globals.get::<_, String>("global")?, "foobar");
 
-    assert_eq!(lua.eval::<i32>("1 + 1", None)?, 2);
-    assert_eq!(lua.eval::<bool>("false == false", None)?, true);
-    assert_eq!(lua.eval::<i32>("return 1 + 2", None)?, 3);
+    assert_eq!(lua.eval::<_, i32>("1 + 1", None)?, 2);
+    assert_eq!(lua.eval::<_, bool>("false == false", None)?, true);
+    assert_eq!(lua.eval::<_, i32>("return 1 + 2", None)?, 3);
 
     // You can create and manage lua tables
 
@@ -59,7 +59,7 @@ fn guided_tour() -> Result<()> {
     globals.set("array_table", array_table)?;
     globals.set("map_table", map_table)?;
 
-    lua.eval::<()>(
+    lua.eval::<_, ()>(
         r#"
         for k, v in pairs(array_table) do
             print(k, v)
@@ -110,14 +110,17 @@ fn guided_tour() -> Result<()> {
     globals.set("join", join)?;
 
     assert_eq!(
-        lua.eval::<bool>(r#"check_equal({"a", "b", "c"}, {"a", "b", "c"})"#, None)?,
+        lua.eval::<_, bool>(r#"check_equal({"a", "b", "c"}, {"a", "b", "c"})"#, None)?,
         true
     );
     assert_eq!(
-        lua.eval::<bool>(r#"check_equal({"a", "b", "c"}, {"d", "e", "f"})"#, None)?,
+        lua.eval::<_, bool>(r#"check_equal({"a", "b", "c"}, {"d", "e", "f"})"#, None)?,
         false
     );
-    assert_eq!(lua.eval::<String>(r#"join("a", "b", "c")"#, None)?, "abc");
+    assert_eq!(
+        lua.eval::<_, String>(r#"join("a", "b", "c")"#, None)?,
+        "abc"
+    );
 
     // You can create userdata with methods and metamethods defined on them.
     // Here's a worked example that shows many of the features of this API
@@ -127,7 +130,7 @@ fn guided_tour() -> Result<()> {
     struct Vec2(f32, f32);
 
     impl UserData for Vec2 {
-        fn add_methods(methods: &mut UserDataMethods<Self>) {
+        fn add_methods<'lua, M: UserDataMethods<'lua, Self>>(methods: &mut M) {
             methods.add_method("magnitude", |_, vec, ()| {
                 let mag_squared = vec.0 * vec.0 + vec.1 * vec.1;
                 Ok(mag_squared.sqrt())
@@ -143,43 +146,42 @@ fn guided_tour() -> Result<()> {
     globals.set("vec2", vec2_constructor)?;
 
     assert!(
-        (lua.eval::<f32>("(vec2(1, 2) + vec2(2, 2)):magnitude()", None)? - 5.0).abs()
+        (lua.eval::<_, f32>("(vec2(1, 2) + vec2(2, 2)):magnitude()", None)? - 5.0).abs()
             < f32::EPSILON
     );
 
     // Normally, Rust types passed to `Lua` must be `Send`, because `Lua` itself is `Send`, and must
     // be `'static`, because there is no way to tell when Lua might garbage collect them.  There is,
     // however, a limited way to lift both of these restrictions.  You can call `Lua::scope` to
-    // create userdata types that do not have to be `Send`, and callback types that do not have to
-    // be `Send` OR `'static`.
+    // create userdata and callbacks types that only live for as long as the call to scope, but do
+    // not have to be `Send` OR `'static`.
 
-    let mut rust_val = 0;
+    {
+        let mut rust_val = 0;
 
-    lua.scope(|scope| {
-        // We create a 'sketchy' lua callback that modifies the variable `rust_val`.  Outside of a
-        // `Lua::scope` call, this would not be allowed.
+        lua.scope(|scope| {
+            // We create a 'sketchy' lua callback that modifies the variable `rust_val`.  Outside of a
+            // `Lua::scope` call, this would not be allowed because it could be unsafe.
 
-        lua.globals().set(
-            "sketchy",
-            scope.create_function_mut(|_, ()| {
-                rust_val = 42;
-                Ok(())
-            })?,
-        )?;
+            lua.globals().set(
+                "sketchy",
+                scope.create_function_mut(|_, ()| {
+                    rust_val = 42;
+                    Ok(())
+                })?,
+            )?;
 
-        lua.eval::<()>("sketchy()", None)
-    })?;
+            lua.eval::<_, ()>("sketchy()", None)
+        })?;
+
+        assert_eq!(rust_val, 42);
+    }
 
     // We were able to run our 'sketchy' function inside the scope just fine.  However, if we try to
     // run our 'sketchy' function outside of the scope, the function we created will have been
-    // destroyed and we will generate an error.
-
-    assert_eq!(rust_val, 42);
-    assert!(lua.eval::<()>("sketchy()", None).is_err());
+    // invalidated and we will generate an error.  If our function wasn't invalidated, we might be
+    // able to improperly access the destroyed `rust_val` which would be unsafe.
+    assert!(lua.eval::<_, ()>("sketchy()", None).is_err());
 
     Ok(())
-}
-
-fn main() {
-    guided_tour().unwrap();
 }

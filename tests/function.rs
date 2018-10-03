@@ -1,10 +1,12 @@
-use {Function, Lua, String};
+extern crate rlua;
+
+use rlua::{Function, Lua, String};
 
 #[test]
 fn test_function() {
     let lua = Lua::new();
     let globals = lua.globals();
-    lua.exec::<()>(
+    lua.exec::<_, ()>(
         r#"
         function concat(arg1, arg2)
             return arg1 .. arg2
@@ -21,7 +23,7 @@ fn test_function() {
 fn test_bind() {
     let lua = Lua::new();
     let globals = lua.globals();
-    lua.exec::<()>(
+    lua.exec::<_, ()>(
         r#"
         function concat(...)
             local res = ""
@@ -48,7 +50,7 @@ fn test_bind() {
 fn test_rust_function() {
     let lua = Lua::new();
     let globals = lua.globals();
-    lua.exec::<()>(
+    lua.exec::<_, ()>(
         r#"
         function lua_function()
             return rust_function()

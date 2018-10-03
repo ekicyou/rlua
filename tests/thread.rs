@@ -1,13 +1,15 @@
+extern crate rlua;
+
 use std::panic::catch_unwind;
 
-use {Error, Function, Lua, Result, Thread, ThreadStatus};
+use rlua::{Error, Function, Lua, Result, Thread, ThreadStatus};
 
 #[test]
 fn test_thread() {
     let lua = Lua::new();
-    let thread =
-        lua.create_thread(
-            lua.eval::<Function>(
+    let thread = lua
+        .create_thread(
+            lua.eval::<_, Function>(
                 r#"
                 function (s)
                     local sum = s
@@ -33,9 +35,9 @@ fn test_thread() {
     assert_eq!(thread.resume::<_, i64>(4).unwrap(), 10);
     assert_eq!(thread.status(), ThreadStatus::Unresumable);
 
-    let accumulate =
-        lua.create_thread(
-            lua.eval::<Function>(
+    let accumulate = lua
+        .create_thread(
+            lua.eval::<_, Function>(
                 r#"
                 function (sum)
                     while true do
@@ -55,8 +57,8 @@ fn test_thread() {
     assert!(accumulate.resume::<_, ()>("error").is_err());
     assert_eq!(accumulate.status(), ThreadStatus::Error);
 
-    let thread =
-        lua.eval::<Thread>(
+    let thread = lua
+        .eval::<_, Thread>(
             r#"
                 coroutine.create(function ()
                     while true do
@@ -69,8 +71,8 @@ fn test_thread() {
     assert_eq!(thread.status(), ThreadStatus::Resumable);
     assert_eq!(thread.resume::<_, i64>(()).unwrap(), 42);
 
-    let thread: Thread =
-        lua.eval(
+    let thread: Thread = lua
+        .eval(
             r#"
                 coroutine.create(function(arg)
                     assert(arg == 42)

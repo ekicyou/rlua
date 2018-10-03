@@ -20,9 +20,9 @@ fn main() {
                 Err(_) => return,
             }
 
-            match lua.eval::<MultiValue>(&line, None) {
+            match lua.eval::<_, MultiValue>(&line, None) {
                 Ok(values) => {
-                    editor.add_history_entry(&line);
+                    editor.add_history_entry(line);
                     println!(
                         "{}",
                         values

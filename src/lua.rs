@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::ffi::CString;
 use std::marker::PhantomData;
 use std::os::raw::{c_char, c_int, c_void};
+use std::string::String as StdString;
 use std::sync::{Arc, Mutex};
 use std::{mem, ptr, str};
 
@@ -20,8 +21,9 @@ use types::{Callback, Integer, LightUserData, LuaRef, Number, RegistryKey};
 use userdata::{AnyUserData, MetaMethod, UserData, UserDataMethods};
 use util::{
     assert_stack, callback_error, check_stack, gc_guard, get_userdata, get_wrapped_error,
-    init_error_metatables, main_state, pop_error, protect_lua, protect_lua_closure, push_string,
-    push_userdata, push_wrapped_error, safe_pcall, safe_xpcall, userdata_destructor, StackGuard,
+    init_error_metatables, init_userdata_metatable, main_state, pop_error, protect_lua,
+    protect_lua_closure, push_string, push_userdata, push_wrapped_error, safe_pcall, safe_xpcall,
+    userdata_destructor, StackGuard,
 };
 use value::{FromLua, FromLuaMulti, MultiValue, Nil, ToLua, ToLuaMulti, Value};
 
@@ -75,10 +77,14 @@ impl Lua {
     /// results in better error traces.
     ///
     /// Equivalent to Lua's `load` function.
-    pub fn load(&self, source: &str, name: Option<&str>) -> Result<Function> {
+    pub fn load<S>(&self, source: &S, name: Option<&str>) -> Result<Function>
+    where
+        S: ?Sized + AsRef<[u8]>,
+    {
         unsafe {
             let _sg = StackGuard::new(self.state);
             assert_stack(self.state, 1);
+            let source = source.as_ref();
 
             match if let Some(name) = name {
                 let name =
@@ -113,11 +119,15 @@ impl Lua {
     /// function with no arguments.
     ///
     /// Returns the values returned by the chunk.
-    pub fn exec<'lua, R: FromLuaMulti<'lua>>(
+    pub fn exec<'lua, S, R: FromLuaMulti<'lua>>(
         &'lua self,
-        source: &str,
+        source: &S,
         name: Option<&str>,
-    ) -> Result<R> {
+    ) -> Result<R>
+    where
+        S: ?Sized + AsRef<[u8]>,
+        R: FromLuaMulti<'lua>,
+    {
         self.load(source, name)?.call(())
     }
 
@@ -125,21 +135,28 @@ impl Lua {
     ///
     /// If `source` is an expression, returns the value it evaluates to. Otherwise, returns the
     /// values returned by the chunk (if any).
-    pub fn eval<'lua, R: FromLuaMulti<'lua>>(
-        &'lua self,
-        source: &str,
-        name: Option<&str>,
-    ) -> Result<R> {
+    pub fn eval<'lua, S, R>(&'lua self, source: &S, name: Option<&str>) -> Result<R>
+    where
+        S: ?Sized + AsRef<[u8]>,
+        R: FromLuaMulti<'lua>,
+    {
         // First, try interpreting the lua as an expression by adding
         // "return", then as a statement.  This is the same thing the
         // actual lua repl does.
-        self.load(&format!("return {}", source), name)
+        let mut return_source = "return ".as_bytes().to_vec();
+        return_source.extend(source.as_ref());
+        self.load(&return_source, name)
             .or_else(|_| self.load(source, name))?
             .call(())
     }
 
-    /// Pass a `&str` slice to Lua, creating and returning an interned Lua string.
-    pub fn create_string(&self, s: &str) -> Result<String> {
+    /// Create and return an interned Lua string.  Lua strings can be arbitrary [u8] data including
+    /// embedded nulls, so in addition to `&str` and `&String`, you can also pass plain `&[u8]`
+    /// here.
+    pub fn create_string<S>(&self, s: &S) -> Result<String>
+    where
+        S: ?Sized + AsRef<[u8]>,
+    {
         unsafe {
             let _sg = StackGuard::new(self.state);
             assert_stack(self.state, 4);
@@ -312,7 +329,7 @@ impl Lua {
     /// Create a Lua userdata object from a custom userdata type.
     pub fn create_userdata<T>(&self, data: T) -> Result<AnyUserData>
     where
-        T: Send + UserData,
+        T: 'static + Send + UserData,
     {
         unsafe { self.make_userdata(data) }
     }
@@ -328,15 +345,15 @@ impl Lua {
     }
 
     /// Calls the given function with a `Scope` parameter, giving the function the ability to create
-    /// userdata from rust types that are !Send, and rust callbacks that are !Send and not 'static.
+    /// userdata and callbacks from rust types that are !Send or non-'static.
     ///
     /// The lifetime of any function or userdata created through `Scope` lasts only until the
     /// completion of this method call, on completion all such created values are automatically
     /// dropped and Lua references to them are invalidated.  If a script accesses a value created
     /// through `Scope` outside of this method, a Lua error will result.  Since we can ensure the
     /// lifetime of values created through `Scope`, and we know that `Lua` cannot be sent to another
-    /// thread while `Scope` is live, it is safe to allow !Send datatypes and functions whose
-    /// lifetimes only outlive the scope lifetime.
+    /// thread while `Scope` is live, it is safe to allow !Send datatypes and whose lifetimes only
+    /// outlive the scope lifetime.
     ///
     /// Handles that `Lua::scope` produces have a `'lua` lifetime of the scope parameter, to prevent
     /// the handles from escaping the callback.  However, this is not the only way for values to
@@ -354,84 +371,73 @@ impl Lua {
         r
     }
 
-    /// Coerces a Lua value to a string.
+    /// Attempts to coerce a Lua value into a String in a manner consistent with Lua's internal
+    /// behavior.
     ///
-    /// The value must be a string (in which case this is a no-op) or a number.
-    pub fn coerce_string<'lua>(&'lua self, v: Value<'lua>) -> Result<String<'lua>> {
+    /// To succeed, the value must be a string (in which case this is a no-op), an integer, or a
+    /// number.
+    pub fn coerce_string<'lua>(&'lua self, v: Value<'lua>) -> Option<String<'lua>> {
         match v {
-            Value::String(s) => Ok(s),
+            Value::String(s) => Some(s),
             v => unsafe {
                 let _sg = StackGuard::new(self.state);
                 assert_stack(self.state, 4);
 
-                let ty = v.type_name();
                 self.push_value(v);
-                let s =
-                    protect_lua_closure(self.state, 1, 1, |state| ffi::lua_tostring(state, -1))?;
+                let s = gc_guard(self.state, || ffi::lua_tostring(self.state, -1));
                 if s.is_null() {
-                    Err(Error::FromLuaConversionError {
-                        from: ty,
-                        to: "String",
-                        message: Some("expected string or number".to_string()),
-                    })
+                    None
                 } else {
-                    Ok(String(self.pop_ref()))
+                    Some(String(self.pop_ref()))
                 }
             },
         }
     }
 
-    /// Coerces a Lua value to an integer.
+    /// Attempts to coerce a Lua value into an integer in a manner consistent with Lua's internal
+    /// behavior.
     ///
-    /// The value must be an integer, or a floating point number, or a string that can be converted
-    /// to an integer. Refer to the Lua manual for details.
-    pub fn coerce_integer(&self, v: Value) -> Result<Integer> {
+    /// To succeed, the value must be an integer, a floating point number that has an exact
+    /// representation as an integer, or a string that can be converted to an integer. Refer to the
+    /// Lua manual for details.
+    pub fn coerce_integer(&self, v: Value) -> Option<Integer> {
         match v {
-            Value::Integer(i) => Ok(i),
+            Value::Integer(i) => Some(i),
             v => unsafe {
                 let _sg = StackGuard::new(self.state);
                 assert_stack(self.state, 2);
 
-                let ty = v.type_name();
                 self.push_value(v);
                 let mut isint = 0;
                 let i = ffi::lua_tointegerx(self.state, -1, &mut isint);
                 if isint == 0 {
-                    Err(Error::FromLuaConversionError {
-                        from: ty,
-                        to: "integer",
-                        message: None,
-                    })
+                    None
                 } else {
-                    Ok(i)
+                    Some(i)
                 }
             },
         }
     }
 
-    /// Coerce a Lua value to a number.
+    /// Attempts to coerce a Lua value into a Number in a manner consistent with Lua's internal
+    /// behavior.
     ///
-    /// The value must be a number or a string that can be converted to a number. Refer to the Lua
-    /// manual for details.
-    pub fn coerce_number(&self, v: Value) -> Result<Number> {
+    /// To succeed, the value must be a number or a string that can be converted to a number. Refer
+    /// to the Lua manual for details.
+    pub fn coerce_number(&self, v: Value) -> Option<Number> {
         match v {
-            Value::Number(n) => Ok(n),
+            Value::Number(n) => Some(n),
             v => unsafe {
                 let _sg = StackGuard::new(self.state);
                 assert_stack(self.state, 2);
 
-                let ty = v.type_name();
                 self.push_value(v);
                 let mut isnum = 0;
                 let n = ffi::lua_tonumberx(self.state, -1, &mut isnum);
                 if isnum == 0 {
-                    Err(Error::FromLuaConversionError {
-                        from: ty,
-                        to: "number",
-                        message: Some("number or string coercible to number".to_string()),
-                    })
+                    None
                 } else {
-                    Ok(n)
+                    Some(n)
                 }
             },
         }
@@ -768,27 +774,7 @@ impl Lua {
         }
     }
 
-    pub(crate) unsafe fn userdata_metatable<T: UserData>(&self) -> Result<c_int> {
-        // Used if both an __index metamethod is set and regular methods, checks methods table
-        // first, then __index metamethod.
-        unsafe extern "C" fn meta_index_impl(state: *mut ffi::lua_State) -> c_int {
-            ffi::luaL_checkstack(state, 2, ptr::null());
-
-            ffi::lua_pushvalue(state, -1);
-            ffi::lua_gettable(state, ffi::lua_upvalueindex(1));
-            if ffi::lua_isnil(state, -1) == 0 {
-                ffi::lua_insert(state, -3);
-                ffi::lua_pop(state, 2);
-                1
-            } else {
-                ffi::lua_pop(state, 1);
-                ffi::lua_pushvalue(state, ffi::lua_upvalueindex(2));
-                ffi::lua_insert(state, -3);
-                ffi::lua_call(state, 2, 1);
-                1
-            }
-        }
-
+    pub(crate) unsafe fn userdata_metatable<T: 'static + UserData>(&self) -> Result<c_int> {
         if let Some(table_id) = (*extra_data(self.state))
             .registered_userdata
             .get(&TypeId::of::<T>())
@@ -797,27 +783,29 @@ impl Lua {
         }
 
         let _sg = StackGuard::new(self.state);
-        assert_stack(self.state, 6);
+        assert_stack(self.state, 8);
 
-        let mut methods = UserDataMethods {
-            methods: HashMap::new(),
-            meta_methods: HashMap::new(),
-            _type: PhantomData,
-        };
+        let mut methods = StaticUserDataMethods::default();
         T::add_methods(&mut methods);
 
         protect_lua_closure(self.state, 0, 1, |state| {
             ffi::lua_newtable(state);
         })?;
+        for (k, m) in methods.meta_methods {
+            push_string(self.state, k.name())?;
+            self.push_value(Value::Function(self.create_callback(m)?));
 
-        let has_methods = !methods.methods.is_empty();
+            protect_lua_closure(self.state, 3, 1, |state| {
+                ffi::lua_rawset(state, -3);
+            })?;
+        }
 
-        if has_methods {
-            push_string(self.state, "__index")?;
+        if methods.methods.is_empty() {
+            init_userdata_metatable::<RefCell<T>>(self.state, -1, None)?;
+        } else {
             protect_lua_closure(self.state, 0, 1, |state| {
                 ffi::lua_newtable(state);
             })?;
-
             for (k, m) in methods.methods {
                 push_string(self.state, &k)?;
                 self.push_value(Value::Function(self.create_callback(m)?));
@@ -826,69 +814,9 @@ impl Lua {
                 })?;
             }
 
-            protect_lua_closure(self.state, 3, 1, |state| {
-                ffi::lua_rawset(state, -3);
-            })?;
+            init_userdata_metatable::<RefCell<T>>(self.state, -2, Some(-1))?;
+            ffi::lua_pop(self.state, 1);
         }
-
-        for (k, m) in methods.meta_methods {
-            if k == MetaMethod::Index && has_methods {
-                push_string(self.state, "__index")?;
-                ffi::lua_pushvalue(self.state, -1);
-                ffi::lua_gettable(self.state, -3);
-                self.push_value(Value::Function(self.create_callback(m)?));
-                protect_lua_closure(self.state, 2, 1, |state| {
-                    ffi::lua_pushcclosure(state, meta_index_impl, 2);
-                })?;
-
-                protect_lua_closure(self.state, 3, 1, |state| {
-                    ffi::lua_rawset(state, -3);
-                })?;
-            } else {
-                let name = match k {
-                    MetaMethod::Add => "__add",
-                    MetaMethod::Sub => "__sub",
-                    MetaMethod::Mul => "__mul",
-                    MetaMethod::Div => "__div",
-                    MetaMethod::Mod => "__mod",
-                    MetaMethod::Pow => "__pow",
-                    MetaMethod::Unm => "__unm",
-                    MetaMethod::IDiv => "__idiv",
-                    MetaMethod::BAnd => "__band",
-                    MetaMethod::BOr => "__bor",
-                    MetaMethod::BXor => "__bxor",
-                    MetaMethod::BNot => "__bnot",
-                    MetaMethod::Shl => "__shl",
-                    MetaMethod::Shr => "__shr",
-                    MetaMethod::Concat => "__concat",
-                    MetaMethod::Len => "__len",
-                    MetaMethod::Eq => "__eq",
-                    MetaMethod::Lt => "__lt",
-                    MetaMethod::Le => "__le",
-                    MetaMethod::Index => "__index",
-                    MetaMethod::NewIndex => "__newindex",
-                    MetaMethod::Call => "__call",
-                    MetaMethod::ToString => "__tostring",
-                };
-                push_string(self.state, name)?;
-                self.push_value(Value::Function(self.create_callback(m)?));
-                protect_lua_closure(self.state, 3, 1, |state| {
-                    ffi::lua_rawset(state, -3);
-                })?;
-            }
-        }
-
-        push_string(self.state, "__gc")?;
-        ffi::lua_pushcfunction(self.state, userdata_destructor::<RefCell<T>>);
-        protect_lua_closure(self.state, 3, 1, |state| {
-            ffi::lua_rawset(state, -3);
-        })?;
-
-        push_string(self.state, "__metatable")?;
-        ffi::lua_pushboolean(self.state, 0);
-        protect_lua_closure(self.state, 3, 1, |state| {
-            ffi::lua_rawset(state, -3);
-        })?;
 
         let id = gc_guard(self.state, || {
             ffi::luaL_ref(self.state, ffi::LUA_REGISTRYINDEX)
@@ -899,6 +827,14 @@ impl Lua {
         Ok(id)
     }
 
+    // Creates a Function out of a Callback containing a 'static Fn.  This is safe ONLY because the
+    // Fn is 'static, otherwise it could capture 'callback arguments improperly.  Without ATCs, we
+    // cannot easily deal with the "correct" callback type of:
+    //
+    // Box<for<'lua> Fn(&'lua Lua, MultiValue<'lua>) -> Result<MultiValue<'lua>>)>
+    //
+    // So we instead use a caller provided lifetime, which without the 'static requirement would be
+    // unsafe.
     pub(crate) fn create_callback<'lua, 'callback>(
         &'lua self,
         func: Callback<'callback, 'static>,
@@ -965,7 +901,7 @@ impl Lua {
     // Does not require Send bounds, which can lead to unsafety.
     pub(crate) unsafe fn make_userdata<T>(&self, data: T) -> Result<AnyUserData>
     where
-        T: UserData,
+        T: 'static + UserData,
     {
         let _sg = StackGuard::new(self.state);
         assert_stack(self.state, 4);
@@ -1130,3 +1066,170 @@ unsafe fn ref_stack_pop(extra: *mut ExtraData) -> c_int {
 }
 
 static FUNCTION_METATABLE_REGISTRY_KEY: u8 = 0;
+
+struct StaticUserDataMethods<'lua, T: 'static + UserData> {
+    methods: HashMap<StdString, Callback<'lua, 'static>>,
+    meta_methods: HashMap<MetaMethod, Callback<'lua, 'static>>,
+    _type: PhantomData<T>,
+}
+
+impl<'lua, T: 'static + UserData> Default for StaticUserDataMethods<'lua, T> {
+    fn default() -> StaticUserDataMethods<'lua, T> {
+        StaticUserDataMethods {
+            methods: HashMap::new(),
+            meta_methods: HashMap::new(),
+            _type: PhantomData,
+        }
+    }
+}
+
+impl<'lua, T: 'static + UserData> UserDataMethods<'lua, T> for StaticUserDataMethods<'lua, T> {
+    fn add_method<A, R, M>(&mut self, name: &str, method: M)
+    where
+        A: FromLuaMulti<'lua>,
+        R: ToLuaMulti<'lua>,
+        M: 'static + Send + Fn(&'lua Lua, &T, A) -> Result<R>,
+    {
+        self.methods
+            .insert(name.to_owned(), Self::box_method(method));
+    }
+
+    fn add_method_mut<A, R, M>(&mut self, name: &str, method: M)
+    where
+        A: FromLuaMulti<'lua>,
+        R: ToLuaMulti<'lua>,
+        M: 'static + Send + FnMut(&'lua Lua, &mut T, A) -> Result<R>,
+    {
+        self.methods
+            .insert(name.to_owned(), Self::box_method_mut(method));
+    }
+
+    fn add_function<A, R, F>(&mut self, name: &str, function: F)
+    where
+        A: FromLuaMulti<'lua>,
+        R: ToLuaMulti<'lua>,
+        F: 'static + Send + Fn(&'lua Lua, A) -> Result<R>,
+    {
+        self.methods
+            .insert(name.to_owned(), Self::box_function(function));
+    }
+
+    fn add_function_mut<A, R, F>(&mut self, name: &str, function: F)
+    where
+        A: FromLuaMulti<'lua>,
+        R: ToLuaMulti<'lua>,
+        F: 'static + Send + FnMut(&'lua Lua, A) -> Result<R>,
+    {
+        self.methods
+            .insert(name.to_owned(), Self::box_function_mut(function));
+    }
+
+    fn add_meta_method<A, R, M>(&mut self, meta: MetaMethod, method: M)
+    where
+        A: FromLuaMulti<'lua>,
+        R: ToLuaMulti<'lua>,
+        M: 'static + Send + Fn(&'lua Lua, &T, A) -> Result<R>,
+    {
+        self.meta_methods.insert(meta, Self::box_method(method));
+    }
+
+    fn add_meta_method_mut<A, R, M>(&mut self, meta: MetaMethod, method: M)
+    where
+        A: FromLuaMulti<'lua>,
+        R: ToLuaMulti<'lua>,
+        M: 'static + Send + FnMut(&'lua Lua, &mut T, A) -> Result<R>,
+    {
+        self.meta_methods.insert(meta, Self::box_method_mut(method));
+    }
+
+    fn add_meta_function<A, R, F>(&mut self, meta: MetaMethod, function: F)
+    where
+        A: FromLuaMulti<'lua>,
+        R: ToLuaMulti<'lua>,
+        F: 'static + Send + Fn(&'lua Lua, A) -> Result<R>,
+    {
+        self.meta_methods.insert(meta, Self::box_function(function));
+    }
+
+    fn add_meta_function_mut<A, R, F>(&mut self, meta: MetaMethod, function: F)
+    where
+        A: FromLuaMulti<'lua>,
+        R: ToLuaMulti<'lua>,
+        F: 'static + Send + FnMut(&'lua Lua, A) -> Result<R>,
+    {
+        self.meta_methods
+            .insert(meta, Self::box_function_mut(function));
+    }
+}
+
+impl<'lua, T: 'static + UserData> StaticUserDataMethods<'lua, T> {
+    fn box_method<A, R, M>(method: M) -> Callback<'lua, 'static>
+    where
+        A: FromLuaMulti<'lua>,
+        R: ToLuaMulti<'lua>,
+        M: 'static + Send + Fn(&'lua Lua, &T, A) -> Result<R>,
+    {
+        Box::new(move |lua, mut args| {
+            if let Some(front) = args.pop_front() {
+                let userdata = AnyUserData::from_lua(front, lua)?;
+                let userdata = userdata.borrow::<T>()?;
+                method(lua, &userdata, A::from_lua_multi(args, lua)?)?.to_lua_multi(lua)
+            } else {
+                Err(Error::FromLuaConversionError {
+                    from: "missing argument",
+                    to: "userdata",
+                    message: None,
+                })
+            }
+        })
+    }
+
+    fn box_method_mut<A, R, M>(method: M) -> Callback<'lua, 'static>
+    where
+        A: FromLuaMulti<'lua>,
+        R: ToLuaMulti<'lua>,
+        M: 'static + Send + FnMut(&'lua Lua, &mut T, A) -> Result<R>,
+    {
+        let method = RefCell::new(method);
+        Box::new(move |lua, mut args| {
+            if let Some(front) = args.pop_front() {
+                let userdata = AnyUserData::from_lua(front, lua)?;
+                let mut userdata = userdata.borrow_mut::<T>()?;
+                let mut method = method
+                    .try_borrow_mut()
+                    .map_err(|_| Error::RecursiveMutCallback)?;
+                (&mut *method)(lua, &mut userdata, A::from_lua_multi(args, lua)?)?.to_lua_multi(lua)
+            } else {
+                Err(Error::FromLuaConversionError {
+                    from: "missing argument",
+                    to: "userdata",
+                    message: None,
+                })
+            }
+        })
+    }
+
+    fn box_function<A, R, F>(function: F) -> Callback<'lua, 'static>
+    where
+        A: FromLuaMulti<'lua>,
+        R: ToLuaMulti<'lua>,
+        F: 'static + Send + Fn(&'lua Lua, A) -> Result<R>,
+    {
+        Box::new(move |lua, args| function(lua, A::from_lua_multi(args, lua)?)?.to_lua_multi(lua))
+    }
+
+    fn box_function_mut<A, R, F>(function: F) -> Callback<'lua, 'static>
+    where
+        A: FromLuaMulti<'lua>,
+        R: ToLuaMulti<'lua>,
+        F: 'static + Send + FnMut(&'lua Lua, A) -> Result<R>,
+    {
+        let function = RefCell::new(function);
+        Box::new(move |lua, args| {
+            let function = &mut *function
+                .try_borrow_mut()
+                .map_err(|_| Error::RecursiveMutCallback)?;
+            function(lua, A::from_lua_multi(args, lua)?)?.to_lua_multi(lua)
+        })
+    }
+}

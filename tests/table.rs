@@ -1,4 +1,6 @@
-use {Lua, Nil, Result, Table, Value};
+extern crate rlua;
+
+use rlua::{Lua, Nil, Result, Table, Value};
 
 #[test]
 fn test_set_get() {
@@ -25,7 +27,7 @@ fn test_table() {
     assert_eq!(table2.get::<_, String>("foo").unwrap(), "bar");
     assert_eq!(table1.get::<_, String>("baz").unwrap(), "baf");
 
-    lua.exec::<()>(
+    lua.exec::<_, ()>(
         r#"
                 table1 = {1, 2, 3, 4, 5}
                 table2 = {}
@@ -86,8 +88,7 @@ fn test_table() {
         .set(
             "table4",
             lua.create_sequence_from(vec![1, 2, 3, 4, 5]).unwrap(),
-        )
-        .unwrap();
+        ).unwrap();
     let table4 = globals.get::<_, Table>("table4").unwrap();
     assert_eq!(
         table4.pairs().collect::<Result<Vec<(i64, i64)>>>().unwrap(),
@@ -99,7 +100,7 @@ fn test_table() {
 fn test_table_scope() {
     let lua = Lua::new();
     let globals = lua.globals();
-    lua.exec::<()>(
+    lua.exec::<_, ()>(
         r#"
             touter = {
                 tin = {1, 2, 3}
@@ -130,8 +131,7 @@ fn test_metatable() {
         .set(
             "__index",
             lua.create_function(|_, ()| Ok("index_value")).unwrap(),
-        )
-        .unwrap();
+        ).unwrap();
     table.set_metatable(Some(metatable));
     assert_eq!(table.get::<_, String>("any_key").unwrap(), "index_value");
     match table.raw_get::<_, Value>("any_key").unwrap() {
@@ -149,7 +149,7 @@ fn test_metatable() {
 fn test_table_error() {
     let lua = Lua::new();
     let globals = lua.globals();
-    lua.exec::<()>(
+    lua.exec::<_, ()>(
         r#"
             table = {}
             setmetatable(table, {

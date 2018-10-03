@@ -34,15 +34,15 @@
 //! [`ToLuaMulti`]: trait.ToLuaMulti.html
 //! [`FromLuaMulti`]: trait.FromLuaMulti.html
 //! [`UserData`]: trait.UserData.html
-//! [`UserDataMethods`]: struct.UserDataMethods.html
+//! [`UserDataMethods`]: trait.UserDataMethods.html
 
 // Deny warnings inside doc tests / examples. When this isn't present, rustdoc doesn't show *any*
 // warnings at all.
 #![doc(test(attr(deny(warnings))))]
 
-#[cfg_attr(test, macro_use)]
 extern crate failure;
 extern crate libc;
+extern crate num_traits;
 
 mod error;
 mod ffi;
@@ -60,9 +60,6 @@ mod types;
 mod userdata;
 mod util;
 mod value;
-
-#[cfg(test)]
-mod tests;
 
 pub use error::{Error, ExternalError, ExternalResult, Result};
 pub use function::Function;

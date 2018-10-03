@@ -1,4 +1,5 @@
 use std::fmt;
+use std::result::Result as StdResult;
 use std::sync::Arc;
 
 use failure;
@@ -81,7 +82,7 @@ pub enum Error {
     /// details.
     ///
     /// [`AnyUserData`]: struct.AnyUserData.html
-    /// [`UserDataMethods`]: struct.UserDataMethods.html
+    /// [`UserDataMethods`]: trait.UserDataMethods.html
     UserDataTypeMismatch,
     /// An [`AnyUserData`] immutable borrow failed because it is already borrowed mutably.
     ///
@@ -121,7 +122,7 @@ pub enum Error {
 }
 
 /// A specialized `Result` type used by `rlua`'s API.
-pub type Result<T> = ::std::result::Result<T, Error>;
+pub type Result<T> = StdResult<T, Error>;
 
 impl fmt::Display for Error {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
@@ -221,7 +222,7 @@ pub trait ExternalResult<T> {
     fn to_lua_err(self) -> Result<T>;
 }
 
-impl<T, E> ExternalResult<T> for ::std::result::Result<T, E>
+impl<T, E> ExternalResult<T> for StdResult<T, E>
 where
     E: ExternalError,
 {
