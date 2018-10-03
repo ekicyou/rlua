@@ -30,7 +30,7 @@ fn compare() {
 #[test]
 fn string_views() {
     let lua = Lua::new();
-    lua.eval::<()>(
+    lua.eval::<_, ()>(
         r#"
             ok = "null bytes are valid utf-8, wh\0 knew?"
             err = "but \xff isn't :("
@@ -59,4 +59,11 @@ fn string_views() {
     assert_eq!(empty.to_str().unwrap(), "");
     assert_eq!(empty.as_bytes_with_nul(), &[0]);
     assert_eq!(empty.as_bytes(), &[]);
+}
+
+#[test]
+fn raw_string() {
+    let lua = Lua::new();
+    let rs = lua.create_string(&[0, 1, 2, 3, 0, 1, 2, 3]).unwrap();
+    assert_eq!(rs.as_bytes(), &[0, 1, 2, 3, 0, 1, 2, 3]);
 }
