@@ -1,6 +1,6 @@
 [package]
 name = "rlua"
-version = "0.15.3-alpha.0"
+version = "0.15.4-alpha.0"
 authors = ["kyren <catherine@chucklefish.org>"]
 description = "High level bindings to Lua 5.3"
 repository = "https://github.com/chucklefish/rlua"
@@ -34,7 +34,7 @@ system-lua = ["pkg-config"]
 [dependencies]
 libc = { version = "0.2" }
 failure = { version = "0.1.2" }
-num-traits = { version = "0.2" }
+num-traits = { version = "0.2.6" }
 compiletest_rs = { version = "0.3", optional = true }
 
 [build-dependencies]

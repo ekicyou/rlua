@@ -372,7 +372,7 @@ where
 // Takes an error at the top of the stack, and if it is a WrappedError, converts it to an
 // Error::CallbackError with a traceback, if it is some lua type, prints the error along with a
 // traceback, and if it is a WrappedPanic, does not modify it.  This function should never panic or
-// trigger a error (longjmp).
+// trigger an error (longjmp).
 pub unsafe extern "C" fn error_traceback(state: *mut ffi::lua_State) -> c_int {
     // I believe luaL_traceback requires this much free stack to not error.
     const LUA_TRACEBACK_STACK: c_int = 11;
@@ -485,14 +485,6 @@ pub unsafe extern "C" fn safe_xpcall(state: *mut ffi::lua_State) -> c_int {
     }
 }
 
-// Does not call lua_checkstack, uses 1 stack space.
-pub unsafe fn main_state(state: *mut ffi::lua_State) -> *mut ffi::lua_State {
-    ffi::lua_rawgeti(state, ffi::LUA_REGISTRYINDEX, ffi::LUA_RIDX_MAINTHREAD);
-    let main_state = ffi::lua_tothread(state, -1);
-    ffi::lua_pop(state, 1);
-    main_state
-}
-
 // Pushes a WrappedError::Error to the top of the stack.  Uses two stack spaces and does not call
 // lua_checkstack.
 pub unsafe fn push_wrapped_error(state: *mut ffi::lua_State, err: Error) {
@@ -568,7 +560,10 @@ pub unsafe fn init_error_metatables(state: *mut ffi::lua_State) {
 
                 Ok(1)
             } else {
-                panic!("userdata mismatch in Error metamethod");
+                // TODO: I'm not sure whether this is possible to trigger without bugs in rlua,
+                // could replace with:
+                // rlua_panic!("userdata mismatch in Error __tostring metamethod")
+                Err(Error::UserDataTypeMismatch)
             }
         })
     }
