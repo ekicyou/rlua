@@ -1,20 +1,61 @@
 use std::any::TypeId;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::os::raw::{c_int, c_void};
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::{ptr, str};
 
 use libc;
 
 use crate::context::Context;
+use crate::error::Result;
 use crate::ffi;
+use crate::hook::{hook_proc, Debug, HookTriggers};
 use crate::markers::NoRefUnwindSafe;
 use crate::types::Callback;
 use crate::util::{
     assert_stack, init_error_metatables, protect_lua_closure, safe_pcall, safe_xpcall,
     userdata_destructor,
 };
+
+bitflags! {
+    /// Flags describing the set of lua modules to load.
+    pub struct StdLib: u32 {
+        const BASE = 0x1;
+        const COROUTINE = 0x2;
+        const TABLE = 0x4;
+        const IO = 0x8;
+        const OS = 0x10;
+        const STRING = 0x20;
+        const UTF8 = 0x40;
+        const MATH = 0x80;
+        const PACKAGE = 0x100;
+        const DEBUG = 0x200;
+
+        const ALL = StdLib::BASE.bits
+            | StdLib::COROUTINE.bits
+            | StdLib::TABLE.bits
+            | StdLib::IO.bits
+            | StdLib::OS.bits
+            | StdLib::STRING.bits
+            | StdLib::UTF8.bits
+            | StdLib::MATH.bits
+            | StdLib::PACKAGE.bits
+            | StdLib::DEBUG.bits;
+
+        const ALL_NO_DEBUG = StdLib::BASE.bits
+            | StdLib::COROUTINE.bits
+            | StdLib::TABLE.bits
+            | StdLib::IO.bits
+            | StdLib::OS.bits
+            | StdLib::STRING.bits
+            | StdLib::UTF8.bits
+            | StdLib::MATH.bits
+            | StdLib::PACKAGE.bits;
+    }
+}
 
 /// Top level Lua struct which holds the Lua state itself.
 pub struct Lua {
@@ -44,15 +85,44 @@ impl Drop for Lua {
 impl Lua {
     /// Creates a new Lua state and loads standard library without the `debug` library.
     pub fn new() -> Lua {
-        unsafe { create_lua(false) }
+        unsafe { create_lua(StdLib::ALL_NO_DEBUG) }
     }
 
     /// Creates a new Lua state and loads the standard library including the `debug` library.
     ///
-    /// The debug library is very unsound, loading it and using it breaks all the guarantees of
-    /// rlua.
+    /// The debug library is very unsound, it can be used to break the safety guarantees of rlua.
     pub unsafe fn new_with_debug() -> Lua {
-        create_lua(true)
+        create_lua(StdLib::ALL)
+    }
+
+    /// Creates a new Lua state and loads a subset of the standard libraries.
+    ///
+    /// Use the [`StdLib`] flags to specifiy the libraries you want to load.
+    ///
+    /// Note that the `debug` library can't be loaded using this function as it can be used to break
+    /// the safety guarantees of rlua.  If you really want to load it, use the sister function
+    /// [`Lua::unsafe_new_with`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if `lua_mod` contains `StdLib::DEBUG`
+    pub fn new_with(lua_mod: StdLib) -> Lua {
+        assert!(
+            !lua_mod.contains(StdLib::DEBUG),
+            "The lua debug module can't be loaded using `new_with`. Use `unsafe_new_with` instead."
+        );
+
+        unsafe { create_lua(lua_mod) }
+    }
+
+    /// Creates a new Lua state and loads a subset of the standard libraries.
+    ///
+    /// Use the [`StdLib`] flags to specifiy the libraries you want to load.
+    ///
+    /// This function is unsafe because it can be used to load the `debug` library which can be used
+    /// to break the safety guarantees provided by rlua.
+    pub unsafe fn unsafe_new_with(lua_mod: StdLib) -> Lua {
+        create_lua(lua_mod)
     }
 
     /// The main entry point of the rlua API.
@@ -66,8 +136,8 @@ impl Lua {
     /// state via the [`Context`] type, and there is a `'lua` lifetime associated with these.
     ///
     /// This `'lua` lifetime is somewhat special.  It is what is sometimes called a "generative"
-    /// lifetime or a "branding" lifetime, which is unique for each call to `Lua::context` and
-    /// is invariant.
+    /// lifetime or a "branding" lifetime, which is invariant, and unique for each call to
+    /// `Lua::context`.
     ///
     /// The reason this entry point must be a callback is so that this unique lifetime can be
     /// generated as part of the callback's parameters.  Even though this callback API is somewhat
@@ -91,14 +161,15 @@ impl Lua {
     /// # Examples
     ///
     /// ```
-    /// # use rlua::{Lua};
-    /// # fn main() {
+    /// # use rlua::{Lua, Result};
+    /// # fn main() -> Result<()> {
     /// let lua = Lua::new();
     /// lua.context(|lua_context| {
-    ///    lua_context.exec::<_, ()>(r#"
+    ///    lua_context.load(r#"
     ///        print("hello world!")
-    ///    "#, None).unwrap();
-    /// });
+    ///    "#).exec()
+    /// })?;
+    /// # Ok(())
     /// # }
     /// ```
     ///
@@ -108,6 +179,74 @@ impl Lua {
         F: FnOnce(Context) -> R,
     {
         f(unsafe { Context::new(self.main_state) })
+    }
+
+    /// Sets a 'hook' function that will periodically be called as Lua code executes.
+    ///
+    /// When exactly the hook function is called depends on the contents of the `triggers`
+    /// parameter, see [`HookTriggers`] for more details.
+    ///
+    /// The provided hook function can error, and this error will be propagated through the Lua code
+    /// that was executing at the time the hook was triggered.  This can be used to implement a
+    /// limited form of execution limits by setting [`HookTriggers.every_nth_instruction`] and
+    /// erroring once an instruction limit has been reached.
+    ///
+    /// # Example
+    ///
+    /// Shows each line number of code being executed by the Lua interpreter.
+    ///
+    /// ```
+    /// # extern crate rlua;
+    /// # use rlua::{Lua, HookTriggers, Result};
+    /// # fn main() -> Result<()> {
+    /// let lua = Lua::new();
+    /// lua.set_hook(HookTriggers {
+    ///     every_line: true, ..Default::default()
+    /// }, |_lua_context, debug| {
+    ///     println!("line {}", debug.curr_line());
+    ///     Ok(())
+    /// });
+    /// lua.context(|lua_context| {
+    ///     lua_context.load(r#"
+    ///         local x = 2 + 3
+    ///         local y = x * 63
+    ///         local z = string.len(x..", "..y)
+    ///     "#).exec()
+    /// })?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// [`HookTriggers`]: struct.HookTriggers.html
+    /// [`HookTriggers.every_nth_instruction`]: struct.HookTriggers.html#field.every_nth_instruction
+    pub fn set_hook<F>(&self, triggers: HookTriggers, callback: F)
+    where
+        F: 'static + Send + FnMut(Context, Debug) -> Result<()>,
+    {
+        unsafe {
+            (*extra_data(self.main_state)).hook_callback = Some(Rc::new(RefCell::new(callback)));
+            ffi::lua_sethook(
+                self.main_state,
+                Some(hook_proc),
+                triggers.mask(),
+                triggers.count(),
+            );
+        }
+    }
+
+    /// Remove any hook previously set by `set_hook`. This function has no effect if a hook was not
+    /// previously set.
+    pub fn remove_hook(&self) {
+        unsafe {
+            (*extra_data(self.main_state)).hook_callback = None;
+            ffi::lua_sethook(self.main_state, None, 0, 0);
+        }
+    }
+}
+
+impl Default for Lua {
+    fn default() -> Lua {
+        Lua::new()
     }
 }
 
@@ -120,13 +259,15 @@ pub(crate) struct ExtraData {
     pub ref_stack_size: c_int,
     pub ref_stack_max: c_int,
     pub ref_free: Vec<c_int>,
+
+    pub hook_callback: Option<Rc<RefCell<FnMut(Context, Debug) -> Result<()>>>>,
 }
 
 pub(crate) unsafe fn extra_data(state: *mut ffi::lua_State) -> *mut ExtraData {
     *(ffi::lua_getextraspace(state) as *mut *mut ExtraData)
 }
 
-unsafe fn create_lua(load_debug: bool) -> Lua {
+unsafe fn create_lua(lua_mod_to_load: StdLib) -> Lua {
     unsafe extern "C" fn allocator(
         _: *mut c_void,
         ptr: *mut c_void,
@@ -156,23 +297,48 @@ unsafe fn create_lua(load_debug: bool) -> Lua {
     let ref_thread = rlua_expect!(
         protect_lua_closure(state, 0, 0, |state| {
             // Do not open the debug library, it can be used to cause unsafety.
-            ffi::luaL_requiref(state, cstr!("_G"), ffi::luaopen_base, 1);
-            ffi::luaL_requiref(state, cstr!("coroutine"), ffi::luaopen_coroutine, 1);
-            ffi::luaL_requiref(state, cstr!("table"), ffi::luaopen_table, 1);
-            ffi::luaL_requiref(state, cstr!("io"), ffi::luaopen_io, 1);
-            ffi::luaL_requiref(state, cstr!("os"), ffi::luaopen_os, 1);
-            ffi::luaL_requiref(state, cstr!("string"), ffi::luaopen_string, 1);
-            ffi::luaL_requiref(state, cstr!("utf8"), ffi::luaopen_utf8, 1);
-            ffi::luaL_requiref(state, cstr!("math"), ffi::luaopen_math, 1);
-            ffi::luaL_requiref(state, cstr!("package"), ffi::luaopen_package, 1);
-            ffi::lua_pop(state, 9);
-
-            init_error_metatables(state);
-
-            if load_debug {
+            if lua_mod_to_load.contains(StdLib::BASE) {
+                ffi::luaL_requiref(state, cstr!("_G"), ffi::luaopen_base, 1);
+                ffi::lua_pop(state, 1);
+            }
+            if lua_mod_to_load.contains(StdLib::COROUTINE) {
+                ffi::luaL_requiref(state, cstr!("coroutine"), ffi::luaopen_coroutine, 1);
+                ffi::lua_pop(state, 1);
+            }
+            if lua_mod_to_load.contains(StdLib::TABLE) {
+                ffi::luaL_requiref(state, cstr!("table"), ffi::luaopen_table, 1);
+                ffi::lua_pop(state, 1);
+            }
+            if lua_mod_to_load.contains(StdLib::IO) {
+                ffi::luaL_requiref(state, cstr!("io"), ffi::luaopen_io, 1);
+                ffi::lua_pop(state, 1);
+            }
+            if lua_mod_to_load.contains(StdLib::OS) {
+                ffi::luaL_requiref(state, cstr!("os"), ffi::luaopen_os, 1);
+                ffi::lua_pop(state, 1);
+            }
+            if lua_mod_to_load.contains(StdLib::STRING) {
+                ffi::luaL_requiref(state, cstr!("string"), ffi::luaopen_string, 1);
+                ffi::lua_pop(state, 1);
+            }
+            if lua_mod_to_load.contains(StdLib::UTF8) {
+                ffi::luaL_requiref(state, cstr!("utf8"), ffi::luaopen_utf8, 1);
+                ffi::lua_pop(state, 1);
+            }
+            if lua_mod_to_load.contains(StdLib::MATH) {
+                ffi::luaL_requiref(state, cstr!("math"), ffi::luaopen_math, 1);
+                ffi::lua_pop(state, 1);
+            }
+            if lua_mod_to_load.contains(StdLib::PACKAGE) {
+                ffi::luaL_requiref(state, cstr!("package"), ffi::luaopen_package, 1);
+                ffi::lua_pop(state, 1);
+            }
+            if lua_mod_to_load.contains(StdLib::DEBUG) {
                 ffi::luaL_requiref(state, cstr!("debug"), ffi::luaopen_debug, 1);
                 ffi::lua_pop(state, 1);
             }
+
+            init_error_metatables(state);
 
             // Create the function metatable
 
@@ -231,6 +397,7 @@ unsafe fn create_lua(load_debug: bool) -> Lua {
         ref_stack_size: ffi::LUA_MINSTACK - 1,
         ref_stack_max: 0,
         ref_free: Vec::new(),
+        hook_callback: None,
     }));
     *(ffi::lua_getextraspace(state) as *mut *mut ExtraData) = extra;
 
