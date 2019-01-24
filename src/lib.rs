@@ -41,14 +41,12 @@
 #![doc(test(attr(deny(warnings))))]
 
 #[macro_use]
-extern crate bitflags;
-
-mod error;
-mod ffi;
-#[macro_use]
 mod macros;
+
 mod context;
 mod conversion;
+mod error;
+mod ffi;
 mod function;
 mod hook;
 mod lua;

@@ -379,28 +379,34 @@ fn test_result_conversions() {
 fn test_num_conversion() {
     Lua::new().context(|lua| {
         assert_eq!(
-            lua.coerce_integer(Value::String(lua.create_string("1").unwrap())),
+            lua.coerce_integer(Value::String(lua.create_string("1").unwrap()))
+                .unwrap(),
             Some(1)
         );
         assert_eq!(
-            lua.coerce_integer(Value::String(lua.create_string("1.0").unwrap())),
+            lua.coerce_integer(Value::String(lua.create_string("1.0").unwrap()))
+                .unwrap(),
             Some(1)
         );
         assert_eq!(
-            lua.coerce_integer(Value::String(lua.create_string("1.5").unwrap())),
+            lua.coerce_integer(Value::String(lua.create_string("1.5").unwrap()))
+                .unwrap(),
             None
         );
 
         assert_eq!(
-            lua.coerce_number(Value::String(lua.create_string("1").unwrap())),
+            lua.coerce_number(Value::String(lua.create_string("1").unwrap()))
+                .unwrap(),
             Some(1.0)
         );
         assert_eq!(
-            lua.coerce_number(Value::String(lua.create_string("1.0").unwrap())),
+            lua.coerce_number(Value::String(lua.create_string("1.0").unwrap()))
+                .unwrap(),
             Some(1.0)
         );
         assert_eq!(
-            lua.coerce_number(Value::String(lua.create_string("1.5").unwrap())),
+            lua.coerce_number(Value::String(lua.create_string("1.5").unwrap()))
+                .unwrap(),
             Some(1.5)
         );
 
@@ -556,38 +562,12 @@ fn test_set_metatable_nil() {
 }
 
 #[test]
-fn test_gc_error() {
-    Lua::new().context(|lua| {
-        match lua
-            .load(
-                r#"
-                val = nil
-                table = {}
-                setmetatable(table, {
-                    __gc = function()
-                        error("gcwascalled")
-                    end
-                })
-                table = nil
-                collectgarbage("collect")
-            "#,
-            )
-            .exec()
-        {
-            Err(Error::GarbageCollectorError(_)) => {}
-            Err(e) => panic!("__gc error did not result in correct error, instead: {}", e),
-            Ok(()) => panic!("__gc error did not result in error"),
-        }
-    });
-}
-
-#[test]
 fn test_named_registry_value() {
     Lua::new().context(|lua| {
-        lua.set_named_registry_value::<i32>("test", 42).unwrap();
+        lua.set_named_registry_value::<_, i32>("test", 42).unwrap();
         let f = lua
             .create_function(move |lua, ()| {
-                assert_eq!(lua.named_registry_value::<i32>("test")?, 42);
+                assert_eq!(lua.named_registry_value::<_, i32>("test")?, 42);
                 Ok(())
             })
             .unwrap();

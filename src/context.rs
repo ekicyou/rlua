@@ -4,9 +4,8 @@ use std::collections::HashMap;
 use std::ffi::CString;
 use std::marker::PhantomData;
 use std::os::raw::{c_char, c_int, c_void};
-use std::string::String as StdString;
 use std::sync::Arc;
-use std::{mem, ptr, str};
+use std::{mem, ptr};
 
 use crate::error::{Error, Result};
 use crate::ffi;
@@ -20,7 +19,7 @@ use crate::thread::Thread;
 use crate::types::{Callback, Integer, LightUserData, LuaRef, Number, RegistryKey};
 use crate::userdata::{AnyUserData, MetaMethod, UserData, UserDataMethods};
 use crate::util::{
-    assert_stack, callback_error, check_stack, gc_guard, get_userdata, get_wrapped_error,
+    assert_stack, callback_error, check_stack, get_userdata, get_wrapped_error,
     init_userdata_metatable, pop_error, protect_lua, protect_lua_closure, push_string,
     push_userdata, push_wrapped_error, StackGuard,
 };
@@ -102,8 +101,8 @@ impl<'lua> Context<'lua> {
             protect_lua(self.state, 0, new_table)?;
 
             for (k, v) in cont {
-                self.push_value(k.to_lua(self)?);
-                self.push_value(v.to_lua(self)?);
+                self.push_value(k.to_lua(self)?)?;
+                self.push_value(v.to_lua(self)?)?;
                 unsafe extern "C" fn raw_set(state: *mut ffi::lua_State) -> c_int {
                     ffi::lua_rawset(state, -3);
                     1
@@ -268,22 +267,23 @@ impl<'lua> Context<'lua> {
     ///
     /// To succeed, the value must be a string (in which case this is a no-op), an integer, or a
     /// number.
-    pub fn coerce_string(self, v: Value<'lua>) -> Option<String<'lua>> {
-        match v {
+    pub fn coerce_string(self, v: Value<'lua>) -> Result<Option<String<'lua>>> {
+        Ok(match v {
             Value::String(s) => Some(s),
             v => unsafe {
                 let _sg = StackGuard::new(self.state);
                 assert_stack(self.state, 4);
 
-                self.push_value(v);
-                let s = gc_guard(self.state, || ffi::lua_tostring(self.state, -1));
-                if s.is_null() {
-                    None
-                } else {
+                self.push_value(v)?;
+                if protect_lua_closure(self.state, 1, 1, |state| {
+                    !ffi::lua_tostring(state, -1).is_null()
+                })? {
                     Some(String(self.pop_ref()))
+                } else {
+                    None
                 }
             },
-        }
+        })
     }
 
     /// Attempts to coerce a Lua value into an integer in a manner consistent with Lua's internal
@@ -292,14 +292,14 @@ impl<'lua> Context<'lua> {
     /// To succeed, the value must be an integer, a floating point number that has an exact
     /// representation as an integer, or a string that can be converted to an integer. Refer to the
     /// Lua manual for details.
-    pub fn coerce_integer(self, v: Value<'lua>) -> Option<Integer> {
-        match v {
+    pub fn coerce_integer(self, v: Value<'lua>) -> Result<Option<Integer>> {
+        Ok(match v {
             Value::Integer(i) => Some(i),
             v => unsafe {
                 let _sg = StackGuard::new(self.state);
                 assert_stack(self.state, 2);
 
-                self.push_value(v);
+                self.push_value(v)?;
                 let mut isint = 0;
                 let i = ffi::lua_tointegerx(self.state, -1, &mut isint);
                 if isint == 0 {
@@ -308,7 +308,7 @@ impl<'lua> Context<'lua> {
                     Some(i)
                 }
             },
-        }
+        })
     }
 
     /// Attempts to coerce a Lua value into a Number in a manner consistent with Lua's internal
@@ -316,14 +316,14 @@ impl<'lua> Context<'lua> {
     ///
     /// To succeed, the value must be a number or a string that can be converted to a number. Refer
     /// to the Lua manual for details.
-    pub fn coerce_number(self, v: Value<'lua>) -> Option<Number> {
-        match v {
+    pub fn coerce_number(self, v: Value<'lua>) -> Result<Option<Number>> {
+        Ok(match v {
             Value::Number(n) => Some(n),
             v => unsafe {
                 let _sg = StackGuard::new(self.state);
                 assert_stack(self.state, 2);
 
-                self.push_value(v);
+                self.push_value(v)?;
                 let mut isnum = 0;
                 let n = ffi::lua_tonumberx(self.state, -1, &mut isnum);
                 if isnum == 0 {
@@ -332,7 +332,7 @@ impl<'lua> Context<'lua> {
                     Some(n)
                 }
             },
-        }
+        })
     }
 
     /// Converts a value that implements `ToLua` into a `Value` instance.
@@ -359,14 +359,18 @@ impl<'lua> Context<'lua> {
     ///
     /// This value will be available to rust from all `Lua` instances which share the same main
     /// state.
-    pub fn set_named_registry_value<T: ToLua<'lua>>(self, name: &str, t: T) -> Result<()> {
+    pub fn set_named_registry_value<S, T>(self, name: &S, t: T) -> Result<()>
+    where
+        S: ?Sized + AsRef<[u8]>,
+        T: ToLua<'lua>,
+    {
         let t = t.to_lua(self)?;
         unsafe {
             let _sg = StackGuard::new(self.state);
             assert_stack(self.state, 5);
 
             push_string(self.state, name)?;
-            self.push_value(t);
+            self.push_value(t)?;
 
             unsafe extern "C" fn set_registry(state: *mut ffi::lua_State) -> c_int {
                 ffi::lua_rawset(state, ffi::LUA_REGISTRYINDEX);
@@ -382,7 +386,11 @@ impl<'lua> Context<'lua> {
     /// get a value previously set by [`set_named_registry_value`].
     ///
     /// [`set_named_registry_value`]: #method.set_named_registry_value
-    pub fn named_registry_value<T: FromLua<'lua>>(self, name: &str) -> Result<T> {
+    pub fn named_registry_value<S, T>(self, name: &S) -> Result<T>
+    where
+        S: ?Sized + AsRef<[u8]>,
+        T: FromLua<'lua>,
+    {
         let value = unsafe {
             let _sg = StackGuard::new(self.state);
             assert_stack(self.state, 4);
@@ -404,7 +412,7 @@ impl<'lua> Context<'lua> {
     /// Equivalent to calling [`set_named_registry_value`] with a value of Nil.
     ///
     /// [`set_named_registry_value`]: #method.set_named_registry_value
-    pub fn unset_named_registry_value(self, name: &str) -> Result<()> {
+    pub fn unset_named_registry_value<S: ?Sized + AsRef<[u8]>>(self, name: &S) -> Result<()> {
         self.set_named_registry_value(name, Nil)
     }
 
@@ -418,10 +426,10 @@ impl<'lua> Context<'lua> {
             let _sg = StackGuard::new(self.state);
             assert_stack(self.state, 2);
 
-            self.push_value(t);
-            let registry_id = gc_guard(self.state, || {
-                ffi::luaL_ref(self.state, ffi::LUA_REGISTRYINDEX)
-            });
+            self.push_value(t)?;
+            let registry_id = protect_lua_closure(self.state, 1, 0, |state| {
+                ffi::luaL_ref(state, ffi::LUA_REGISTRYINDEX)
+            })?;
 
             Ok(RegistryKey {
                 registry_id,
@@ -511,7 +519,7 @@ impl<'lua> Context<'lua> {
     }
 
     // Uses 2 stack spaces, does not call checkstack
-    pub(crate) unsafe fn push_value(self, value: Value<'lua>) {
+    pub(crate) unsafe fn push_value(self, value: Value<'lua>) -> Result<()> {
         match value {
             Value::Nil => {
                 ffi::lua_pushnil(self.state);
@@ -554,9 +562,11 @@ impl<'lua> Context<'lua> {
             }
 
             Value::Error(e) => {
-                push_wrapped_error(self.state, e);
+                push_wrapped_error(self.state, e)?;
             }
         }
+
+        Ok(())
     }
 
     // Uses 2 stack spaces, does not call checkstack
@@ -676,7 +686,7 @@ impl<'lua> Context<'lua> {
         })?;
         for (k, m) in methods.meta_methods {
             push_string(self.state, k.name())?;
-            self.push_value(Value::Function(self.create_callback(m)?));
+            self.push_value(Value::Function(self.create_callback(m)?))?;
 
             protect_lua_closure(self.state, 3, 1, |state| {
                 ffi::lua_rawset(state, -3);
@@ -691,7 +701,7 @@ impl<'lua> Context<'lua> {
             })?;
             for (k, m) in methods.methods {
                 push_string(self.state, &k)?;
-                self.push_value(Value::Function(self.create_callback(m)?));
+                self.push_value(Value::Function(self.create_callback(m)?))?;
                 protect_lua_closure(self.state, 3, 1, |state| {
                     ffi::lua_rawset(state, -3);
                 })?;
@@ -701,9 +711,9 @@ impl<'lua> Context<'lua> {
             ffi::lua_pop(self.state, 1);
         }
 
-        let id = gc_guard(self.state, || {
-            ffi::luaL_ref(self.state, ffi::LUA_REGISTRYINDEX)
-        });
+        let id = protect_lua_closure(self.state, 1, 0, |state| {
+            ffi::luaL_ref(state, ffi::LUA_REGISTRYINDEX)
+        })?;
         (*extra_data(self.state))
             .registered_userdata
             .insert(TypeId::of::<T>(), id);
@@ -723,12 +733,11 @@ impl<'lua> Context<'lua> {
     // and will reduce the number of hacks required in Context and Scope.
     pub(crate) fn create_callback(self, func: Callback<'lua, 'static>) -> Result<Function<'lua>> {
         unsafe extern "C" fn call_callback(state: *mut ffi::lua_State) -> c_int {
-            callback_error(state, || {
+            callback_error(state, |nargs| {
                 if ffi::lua_type(state, ffi::lua_upvalueindex(1)) == ffi::LUA_TNIL {
                     return Err(Error::CallbackDestructed);
                 }
 
-                let nargs = ffi::lua_gettop(state);
                 if nargs < ffi::LUA_MINSTACK {
                     check_stack(state, ffi::LUA_MINSTACK - nargs)?;
                 }
@@ -748,7 +757,7 @@ impl<'lua> Context<'lua> {
 
                 check_stack(state, nresults)?;
                 for r in results {
-                    context.push_value(r);
+                    context.push_value(r)?;
                 }
 
                 Ok(nresults)
@@ -833,7 +842,7 @@ impl<'lua> Context<'lua> {
             } {
                 ffi::LUA_OK => {
                     if let Some(env) = env {
-                        self.push_value(env);
+                        self.push_value(env)?;
                         ffi::lua_setupvalue(self.state, -2, 1);
                     }
                     Ok(Function(self.pop_ref()))
@@ -868,13 +877,13 @@ impl<'lua, 'a> Chunk<'lua, 'a> {
         Ok(self)
     }
 
-    /// Sets the first upvalue (_ENV) of the loaded chunk to the given value.
+    /// Sets the first upvalue (`_ENV`) of the loaded chunk to the given value.
     ///
     /// Lua main chunks always have exactly one upvalue, and this upvalue is used as the `_ENV`
     /// variable inside the chunk.  By default this value is set to the global environment.
     ///
-    /// Calling this method changes the _ENV upvalue to the value provided, and variables inside the
-    /// chunk will refer to the given environment rather than the global one.
+    /// Calling this method changes the `_ENV` upvalue to the value provided, and variables inside
+    /// the chunk will refer to the given environment rather than the global one.
     ///
     /// All global variables (including the standard library!) are looked up in `_ENV`, so it may be
     /// necessary to populate the environment in order for scripts using custom environments to be
@@ -948,7 +957,7 @@ unsafe fn ref_stack_pop(extra: *mut ExtraData) -> c_int {
 }
 
 struct StaticUserDataMethods<'lua, T: 'static + UserData> {
-    methods: HashMap<StdString, Callback<'lua, 'static>>,
+    methods: HashMap<Vec<u8>, Callback<'lua, 'static>>,
     meta_methods: HashMap<MetaMethod, Callback<'lua, 'static>>,
     _type: PhantomData<T>,
 }
@@ -964,44 +973,48 @@ impl<'lua, T: 'static + UserData> Default for StaticUserDataMethods<'lua, T> {
 }
 
 impl<'lua, T: 'static + UserData> UserDataMethods<'lua, T> for StaticUserDataMethods<'lua, T> {
-    fn add_method<A, R, M>(&mut self, name: &str, method: M)
+    fn add_method<S, A, R, M>(&mut self, name: &S, method: M)
     where
+        S: ?Sized + AsRef<[u8]>,
         A: FromLuaMulti<'lua>,
         R: ToLuaMulti<'lua>,
         M: 'static + Send + Fn(Context<'lua>, &T, A) -> Result<R>,
     {
         self.methods
-            .insert(name.to_owned(), Self::box_method(method));
+            .insert(name.as_ref().to_vec(), Self::box_method(method));
     }
 
-    fn add_method_mut<A, R, M>(&mut self, name: &str, method: M)
+    fn add_method_mut<S, A, R, M>(&mut self, name: &S, method: M)
     where
+        S: ?Sized + AsRef<[u8]>,
         A: FromLuaMulti<'lua>,
         R: ToLuaMulti<'lua>,
         M: 'static + Send + FnMut(Context<'lua>, &mut T, A) -> Result<R>,
     {
         self.methods
-            .insert(name.to_owned(), Self::box_method_mut(method));
+            .insert(name.as_ref().to_vec(), Self::box_method_mut(method));
     }
 
-    fn add_function<A, R, F>(&mut self, name: &str, function: F)
+    fn add_function<S, A, R, F>(&mut self, name: &S, function: F)
     where
+        S: ?Sized + AsRef<[u8]>,
         A: FromLuaMulti<'lua>,
         R: ToLuaMulti<'lua>,
         F: 'static + Send + Fn(Context<'lua>, A) -> Result<R>,
     {
         self.methods
-            .insert(name.to_owned(), Self::box_function(function));
+            .insert(name.as_ref().to_vec(), Self::box_function(function));
     }
 
-    fn add_function_mut<A, R, F>(&mut self, name: &str, function: F)
+    fn add_function_mut<S, A, R, F>(&mut self, name: &S, function: F)
     where
+        S: ?Sized + AsRef<[u8]>,
         A: FromLuaMulti<'lua>,
         R: ToLuaMulti<'lua>,
         F: 'static + Send + FnMut(Context<'lua>, A) -> Result<R>,
     {
         self.methods
-            .insert(name.to_owned(), Self::box_function_mut(function));
+            .insert(name.as_ref().to_vec(), Self::box_function_mut(function));
     }
 
     fn add_meta_method<A, R, M>(&mut self, meta: MetaMethod, method: M)

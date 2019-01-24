@@ -1,6 +1,6 @@
 [package]
 name = "rlua"
-version = "0.15.4-alpha.0"
+version = "0.16.2-alpha.0"
 authors = ["kyren <catherine@chucklefish.org>"]
 edition = "2018"
 description = "High level bindings to Lua 5.3"
@@ -42,7 +42,7 @@ cc = { version = "1.0", optional = true }
 pkg-config = { version = "0.3.11", optional = true }
 
 [dev-dependencies]
-rustyline = "2.0.0"
+rustyline = "3.0.0"
 criterion = "0.2.0"
 compiletest_rs = { version = "0.3", features = ["stable"] }
 

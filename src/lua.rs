@@ -3,10 +3,11 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::os::raw::{c_int, c_void};
+use std::ptr;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
-use std::{ptr, str};
 
+use bitflags::bitflags;
 use libc;
 
 use crate::context::Context;
@@ -16,7 +17,7 @@ use crate::hook::{hook_proc, Debug, HookTriggers};
 use crate::markers::NoRefUnwindSafe;
 use crate::types::Callback;
 use crate::util::{
-    assert_stack, init_error_metatables, protect_lua_closure, safe_pcall, safe_xpcall,
+    assert_stack, init_error_registry, protect_lua_closure, safe_pcall, safe_xpcall,
     userdata_destructor,
 };
 
@@ -75,9 +76,8 @@ impl Drop for Lua {
                 "reference leak detected"
             );
             *rlua_expect!((*extra).registry_unref_list.lock(), "unref list poisoned") = None;
-            Box::from_raw(extra);
-
             ffi::lua_close(self.main_state);
+            Box::from_raw(extra);
         }
     }
 }
@@ -129,7 +129,7 @@ impl Lua {
     ///
     /// In order to create Lua values, load and execute Lua code, or otherwise interact with the Lua
     /// state in any way, you must first call `Lua::context` and then call methods on the provided
-    /// [`Context]` parameter.
+    /// [`Context`] parameter.
     ///
     /// rlua uses reference types like `String` and `Table` which reference shared data in the Lua
     /// state.  These are special reference counted types that contain pointers to the main Lua
@@ -156,7 +156,7 @@ impl Lua {
     /// It is not possible to return types with this `'lua` context lifetime from the given
     /// callback, or store them outside of the callback in any way.  There is an escape hatch here,
     /// though: if you need to keep references to internal Lua values long-term, you can use the Lua
-    /// registry via `Lua::set_named_registry_value` and `Lua::create_registry_value`.
+    /// registry via [`Context::set_named_registry_value`] and [`Context::create_registry_value`].
     ///
     /// # Examples
     ///
@@ -174,6 +174,8 @@ impl Lua {
     /// ```
     ///
     /// [`Context`]: struct.Context.html
+    /// [`Context::set_named_registry_value`]: struct.Context.html#method.set_named_registry_value
+    /// [`Context::create_registry_value`]: struct.Context.html#method.create_registry_value
     pub fn context<F, R>(&self, f: F) -> R
     where
         F: FnOnce(Context) -> R,
@@ -196,7 +198,6 @@ impl Lua {
     /// Shows each line number of code being executed by the Lua interpreter.
     ///
     /// ```
-    /// # extern crate rlua;
     /// # use rlua::{Lua, HookTriggers, Result};
     /// # fn main() -> Result<()> {
     /// let lua = Lua::new();
@@ -242,6 +243,89 @@ impl Lua {
             ffi::lua_sethook(self.main_state, None, 0, 0);
         }
     }
+
+    /// Returns the memory currently used inside this Lua state.
+    pub fn used_memory(&self) -> usize {
+        unsafe { (*extra_data(self.main_state)).used_memory }
+    }
+
+    /// Sets a memory limit on this Lua state.  Once an allocation occurs that would pass this
+    /// memory limit, a `Error::MemoryError` is generated instead.
+    pub fn set_memory_limit(&self, memory_limit: Option<usize>) {
+        unsafe {
+            (*extra_data(self.main_state)).memory_limit = memory_limit;
+        }
+    }
+
+    /// Returns true if the garbage collector is currently running automatically.
+    pub fn gc_is_running(&self) -> bool {
+        unsafe { ffi::lua_gc(self.main_state, ffi::LUA_GCISRUNNING, 0) != 0 }
+    }
+
+    /// Stop the Lua GC from running
+    pub fn gc_stop(&self) {
+        unsafe {
+            ffi::lua_gc(self.main_state, ffi::LUA_GCSTOP, 0);
+        }
+    }
+
+    /// Restarts the Lua GC if it is not running
+    pub fn gc_restart(&self) {
+        unsafe {
+            ffi::lua_gc(self.main_state, ffi::LUA_GCRESTART, 0);
+        }
+    }
+
+    /// Perform a full garbage-collection cycle.
+    ///
+    /// It may be necessary to call this function twice to collect all currently unreachable
+    /// objects.  Once to finish the current gc cycle, and once to start and finish the next cycle.
+    pub fn gc_collect(&self) -> Result<()> {
+        unsafe {
+            protect_lua_closure(self.main_state, 0, 0, |state| {
+                ffi::lua_gc(state, ffi::LUA_GCCOLLECT, 0);
+            })
+        }
+    }
+
+    /// Steps the garbage collector one indivisible step.
+    ///
+    /// Returns true if this has finished a collection cycle.
+    pub fn gc_step(&self) -> Result<bool> {
+        self.gc_step_kbytes(0)
+    }
+
+    /// Steps the garbage collector as though memory had been allocated.
+    ///
+    /// if `kbytes` is 0, then this is the same as calling `gc_step`.  Returns true if this step has
+    /// finished a collection cycle.
+    pub fn gc_step_kbytes(&self, kbytes: c_int) -> Result<bool> {
+        unsafe {
+            protect_lua_closure(self.main_state, 0, 0, |state| {
+                ffi::lua_gc(state, ffi::LUA_GCSTEP, kbytes) != 0
+            })
+        }
+    }
+
+    /// Sets the 'pause' value of the collector.
+    ///
+    /// Returns the previous value of 'pause'.  More information can be found in the [Lua 5.3
+    /// documentation][lua_doc].
+    ///
+    /// [lua_doc]: https://www.lua.org/manual/5.3/manual.html#2.5
+    pub fn gc_set_pause(&self, pause: c_int) -> c_int {
+        unsafe { ffi::lua_gc(self.main_state, ffi::LUA_GCSETPAUSE, pause) }
+    }
+
+    /// Sets the 'step multiplier' value of the collector.
+    ///
+    /// Returns the previous value of the 'step multiplier'.  More information can be found in the
+    /// [Lua 5.3 documentation][lua_doc].
+    ///
+    /// [lua_doc]: https://www.lua.org/manual/5.3/manual.html#2.5
+    pub fn gc_set_step_multiplier(&self, step_multiplier: c_int) -> c_int {
+        unsafe { ffi::lua_gc(self.main_state, ffi::LUA_GCSETSTEPMUL, step_multiplier) }
+    }
 }
 
 impl Default for Lua {
@@ -260,6 +344,9 @@ pub(crate) struct ExtraData {
     pub ref_stack_max: c_int,
     pub ref_free: Vec<c_int>,
 
+    used_memory: usize,
+    memory_limit: Option<usize>,
+
     pub hook_callback: Option<Rc<RefCell<FnMut(Context, Debug) -> Result<()>>>>,
 }
 
@@ -269,32 +356,63 @@ pub(crate) unsafe fn extra_data(state: *mut ffi::lua_State) -> *mut ExtraData {
 
 unsafe fn create_lua(lua_mod_to_load: StdLib) -> Lua {
     unsafe extern "C" fn allocator(
-        _: *mut c_void,
+        extra_data: *mut c_void,
         ptr: *mut c_void,
-        _: usize,
+        osize: usize,
         nsize: usize,
     ) -> *mut c_void {
+        let extra_data = extra_data as *mut ExtraData;
+
+        // If the `ptr` argument is null, osize instead encodes the allocated object type, which
+        // we currently ignore.
+        let new_used_memory = if ptr.is_null() {
+            (*extra_data).used_memory + nsize
+        } else if nsize >= osize {
+            (*extra_data).used_memory + (nsize - osize)
+        } else {
+            (*extra_data).used_memory - (osize - nsize)
+        };
+
+        if new_used_memory > (*extra_data).used_memory {
+            // We only check memory limits when memory is allocated, not freed
+            if let Some(memory_limit) = (*extra_data).memory_limit {
+                if new_used_memory > memory_limit {
+                    return ptr::null_mut();
+                }
+            }
+        }
+
         if nsize == 0 {
+            (*extra_data).used_memory = new_used_memory;
             libc::free(ptr as *mut libc::c_void);
             ptr::null_mut()
         } else {
-            let p = libc::realloc(ptr as *mut libc::c_void, nsize);
-            if p.is_null() {
-                // We require that OOM results in an abort, and that the lua allocator function
-                // never errors.  Since this is what rust itself normally does on OOM, this is
-                // not really a huge loss.  Importantly, this allows us to turn off the gc, and
-                // then know that calling Lua API functions marked as 'm' will not result in a
-                // 'longjmp' error while the gc is off.
-                abort!("out of memory in rlua::Lua allocation, aborting!");
-            } else {
-                p as *mut c_void
+            let p = libc::realloc(ptr as *mut libc::c_void, nsize) as *mut c_void;
+            if !p.is_null() {
+                // Only commit the new used memory if the allocation was successful.  Probably in
+                // reality, libc::realloc will never fail.
+                (*extra_data).used_memory = new_used_memory;
             }
+            p
         }
     }
 
-    let state = ffi::lua_newstate(allocator, ptr::null_mut());
+    let mut extra = Box::new(ExtraData {
+        registered_userdata: HashMap::new(),
+        registry_unref_list: Arc::new(Mutex::new(Some(Vec::new()))),
+        ref_thread: ptr::null_mut(),
+        // We need 1 extra stack space to move values in and out of the ref stack.
+        ref_stack_size: ffi::LUA_MINSTACK - 1,
+        ref_stack_max: 0,
+        ref_free: Vec::new(),
+        used_memory: 0,
+        memory_limit: None,
+        hook_callback: None,
+    });
 
-    let ref_thread = rlua_expect!(
+    let state = ffi::lua_newstate(allocator, &mut *extra as *mut ExtraData as *mut c_void);
+
+    extra.ref_thread = rlua_expect!(
         protect_lua_closure(state, 0, 0, |state| {
             // Do not open the debug library, it can be used to cause unsafety.
             if lua_mod_to_load.contains(StdLib::BASE) {
@@ -338,7 +456,7 @@ unsafe fn create_lua(lua_mod_to_load: StdLib) -> Lua {
                 ffi::lua_pop(state, 1);
             }
 
-            init_error_metatables(state);
+            init_error_registry(state);
 
             // Create the function metatable
 
@@ -378,7 +496,6 @@ unsafe fn create_lua(lua_mod_to_load: StdLib) -> Lua {
 
             let ref_thread = ffi::lua_newthread(state);
             ffi::luaL_ref(state, ffi::LUA_REGISTRYINDEX);
-
             ref_thread
         }),
         "Error during Lua construction",
@@ -387,19 +504,8 @@ unsafe fn create_lua(lua_mod_to_load: StdLib) -> Lua {
     rlua_debug_assert!(ffi::lua_gettop(state) == 0, "stack leak during creation");
     assert_stack(state, ffi::LUA_MINSTACK);
 
-    // Create ExtraData, and place it in the lua_State "extra space"
-
-    let extra = Box::into_raw(Box::new(ExtraData {
-        registered_userdata: HashMap::new(),
-        registry_unref_list: Arc::new(Mutex::new(Some(Vec::new()))),
-        ref_thread,
-        // We need 1 extra stack space to move values in and out of the ref stack.
-        ref_stack_size: ffi::LUA_MINSTACK - 1,
-        ref_stack_max: 0,
-        ref_free: Vec::new(),
-        hook_callback: None,
-    }));
-    *(ffi::lua_getextraspace(state) as *mut *mut ExtraData) = extra;
+    // Place pointer to ExtraData in the lua_State "extra space"
+    *(ffi::lua_getextraspace(state) as *mut *mut ExtraData) = Box::into_raw(extra);
 
     Lua {
         main_state: state,
